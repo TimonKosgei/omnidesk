@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
+import crypto from "crypto";
 import { 
   InventoryItem, 
   Recipe, 
@@ -172,10 +173,25 @@ const defaultRecipes: Recipe[] = [
   }
 ];
 
+export interface DbUser {
+  id: string;
+  username: string;
+  passwordHash: string;
+  salt: string;
+  displayName: string;
+}
+
 interface DbSchema {
-  inventory: InventoryItem[];
-  weeklyPlan: WeeklyMealPlan;
-  shoppingList: ShoppingItem[];
+  users: DbUser[];
+  sessions: Record<string, string>; // sessionToken -> userId
+  userInventories: Record<string, InventoryItem[]>;
+  userWeeklyPlans: Record<string, WeeklyMealPlan>;
+  userShoppingLists: Record<string, ShoppingItem[]>;
+  
+  // Backward compatibility legacy schemas
+  inventory?: InventoryItem[];
+  weeklyPlan?: WeeklyMealPlan;
+  shoppingList?: ShoppingItem[];
 }
 
 const emptyWeeklyPlan = (): WeeklyMealPlan => {
@@ -201,13 +217,42 @@ export class DbService {
       try {
         const fileContent = await fs.readFile(DB_PATH, "utf-8");
         this.cachedData = JSON.parse(fileContent);
+
+        // Migrate legacy single-user scheme
+        if (this.cachedData && !this.cachedData.users) {
+          const oldInv = this.cachedData.inventory || defaultInventory;
+          const oldPlan = this.cachedData.weeklyPlan || emptyWeeklyPlan();
+          const oldShop = this.cachedData.shoppingList || [];
+
+          this.cachedData = {
+            users: [],
+            sessions: {},
+            userInventories: {
+              "guest": oldInv
+            },
+            userWeeklyPlans: {
+              "guest": oldPlan
+            },
+            userShoppingLists: {
+              "guest": oldShop
+            }
+          };
+          await this.saveData();
+        }
       } catch (err) {
-        // Create default db
         console.log("Database file doesn't exist. Bootstrapping with default Kenyan data.");
         const initialDb: DbSchema = {
-          inventory: defaultInventory,
-          weeklyPlan: emptyWeeklyPlan(),
-          shoppingList: []
+          users: [],
+          sessions: {},
+          userInventories: {
+            "guest": JSON.parse(JSON.stringify(defaultInventory))
+          },
+          userWeeklyPlans: {
+            "guest": emptyWeeklyPlan()
+          },
+          userShoppingLists: {
+            "guest": []
+          }
         };
         await fs.writeFile(DB_PATH, JSON.stringify(initialDb, null, 2));
         this.cachedData = initialDb;
@@ -215,9 +260,17 @@ export class DbService {
     } catch (e) {
       console.error("Failed to initialize JSON database: ", e);
       this.cachedData = {
-        inventory: defaultInventory,
-        weeklyPlan: emptyWeeklyPlan(),
-        shoppingList: []
+        users: [],
+        sessions: {},
+        userInventories: {
+          "guest": JSON.parse(JSON.stringify(defaultInventory))
+        },
+        userWeeklyPlans: {
+          "guest": emptyWeeklyPlan()
+        },
+        userShoppingLists: {
+          "guest": []
+        }
       };
     }
   }
@@ -231,27 +284,114 @@ export class DbService {
     }
   }
 
-  static async getInventory(): Promise<InventoryItem[]> {
+  // --- User & Authentication Operations ---
+  static async findUserByUsername(username: string): Promise<DbUser | null> {
     if (!this.cachedData) await this.initDb();
-    return this.cachedData!.inventory;
+    const normalized = username.toLowerCase().trim();
+    return this.cachedData!.users.find(u => u.username.toLowerCase().trim() === normalized) || null;
+  }
+
+  static async createUser(username: string, passwordPlain: string, displayName: string): Promise<DbUser> {
+    if (!this.cachedData) await this.initDb();
+    const salt = crypto.randomBytes(16).toString("hex");
+    const passwordHash = crypto.pbkdf2Sync(passwordPlain, salt, 1000, 64, "sha512").toString("hex");
+    
+    const newUser: DbUser = {
+      id: Math.random().toString(36).substr(2, 9),
+      username: username.trim(),
+      passwordHash,
+      salt,
+      displayName: displayName.trim() || username.trim()
+    };
+
+    if (!this.cachedData!.users) this.cachedData!.users = [];
+    this.cachedData!.users.push(newUser);
+    
+    // Bootstrap brand new user lists
+    if (!this.cachedData!.userInventories) this.cachedData!.userInventories = {};
+    if (!this.cachedData!.userWeeklyPlans) this.cachedData!.userWeeklyPlans = {};
+    if (!this.cachedData!.userShoppingLists) this.cachedData!.userShoppingLists = {};
+
+    this.cachedData!.userInventories[newUser.id] = JSON.parse(JSON.stringify(defaultInventory));
+    this.cachedData!.userWeeklyPlans[newUser.id] = emptyWeeklyPlan();
+    this.cachedData!.userShoppingLists[newUser.id] = [];
+
+    await this.saveData();
+    return newUser;
+  }
+
+  static async createSession(userId: string): Promise<string> {
+    if (!this.cachedData) await this.initDb();
+    if (!this.cachedData!.sessions) this.cachedData!.sessions = {};
+    const token = crypto.randomBytes(32).toString("hex");
+    this.cachedData!.sessions[token] = userId;
+    await this.saveData();
+    return token;
+  }
+
+  static async getUserIdFromSession(token: string): Promise<string | null> {
+    if (!this.cachedData) await this.initDb();
+    if (!this.cachedData!.sessions) return null;
+    return this.cachedData!.sessions[token] || null;
+  }
+
+  static async deleteSession(token: string): Promise<boolean> {
+    if (!this.cachedData) await this.initDb();
+    if (!this.cachedData!.sessions) return false;
+    if (this.cachedData!.sessions[token]) {
+      delete this.cachedData!.sessions[token];
+      await this.saveData();
+      return true;
+    }
+    return false;
+  }
+
+  static async getUserById(userId: string): Promise<{ id: string; username: string; displayName: string } | null> {
+    if (!this.cachedData) await this.initDb();
+    const user = this.cachedData!.users.find(u => u.id === userId);
+    if (!user) return null;
+    return { id: user.id, username: user.username, displayName: user.displayName };
+  }
+
+  // --- Kitchen Domain Operations ---
+  static async getInventory(userId: string = "guest"): Promise<InventoryItem[]> {
+    if (!this.cachedData) await this.initDb();
+    if (!this.cachedData!.userInventories[userId]) {
+      this.cachedData!.userInventories[userId] = JSON.parse(JSON.stringify(defaultInventory));
+      await this.saveData();
+    }
+    return this.cachedData!.userInventories[userId];
   }
 
   static async getRecipes(): Promise<Recipe[]> {
     return defaultRecipes;
   }
 
-  static async getWeeklyPlan(): Promise<WeeklyMealPlan> {
+  static async getWeeklyPlan(userId: string = "guest"): Promise<WeeklyMealPlan> {
     if (!this.cachedData) await this.initDb();
-    return this.cachedData!.weeklyPlan;
+    if (!this.cachedData!.userWeeklyPlans[userId]) {
+      this.cachedData!.userWeeklyPlans[userId] = emptyWeeklyPlan();
+      await this.saveData();
+    }
+    return this.cachedData!.userWeeklyPlans[userId];
   }
 
-  static async getShoppingList(): Promise<ShoppingItem[]> {
+  static async getShoppingList(userId: string = "guest"): Promise<ShoppingItem[]> {
     if (!this.cachedData) await this.initDb();
-    return this.cachedData!.shoppingList;
+    if (!this.cachedData!.userShoppingLists[userId]) {
+      this.cachedData!.userShoppingLists[userId] = [];
+      await this.saveData();
+    }
+    return this.cachedData!.userShoppingLists[userId];
   }
 
-  static async addInventoryItem(item: Omit<InventoryItem, "id" | "dateAdded">): Promise<InventoryItem> {
+  static async addInventoryItem(item: Omit<InventoryItem, "id" | "dateAdded">, userId: string = "guest"): Promise<InventoryItem> {
     if (!this.cachedData) await this.initDb();
+    
+    if (!this.cachedData!.userInventories[userId]) {
+      this.cachedData!.userInventories[userId] = JSON.parse(JSON.stringify(defaultInventory));
+    }
+
     const newItem: InventoryItem = {
       ...item,
       id: Math.random().toString(36).substr(2, 9),
@@ -259,66 +399,72 @@ export class DbService {
       dateAdded: new Date().toISOString()
     };
     
-    // Check if ingredient already exists to prevent duplicate entities, EXCEPT if they want to edit.
-    const existsIndex = this.cachedData!.inventory.findIndex(
+    const existsIndex = this.cachedData!.userInventories[userId].findIndex(
       (p) => p.name === newItem.name && p.isAlwaysInStock === newItem.isAlwaysInStock
     );
     if (existsIndex > -1) {
-      this.cachedData!.inventory[existsIndex] = {
-        ...this.cachedData!.inventory[existsIndex],
+      this.cachedData!.userInventories[userId][existsIndex] = {
+        ...this.cachedData!.userInventories[userId][existsIndex],
         displayName: item.displayName,
         category: item.category,
         expirationDate: item.expirationDate
       };
       await this.saveData();
-      return this.cachedData!.inventory[existsIndex];
+      return this.cachedData!.userInventories[userId][existsIndex];
     }
 
-    this.cachedData!.inventory.push(newItem);
+    this.cachedData!.userInventories[userId].push(newItem);
     await this.saveData();
     return newItem;
   }
 
-  static async updateInventoryItem(id: string, updates: Partial<InventoryItem>): Promise<InventoryItem | null> {
+  static async updateInventoryItem(id: string, updates: Partial<InventoryItem>, userId: string = "guest"): Promise<InventoryItem | null> {
     if (!this.cachedData) await this.initDb();
-    const idx = this.cachedData!.inventory.findIndex((item) => item.id === id);
+    if (!this.cachedData!.userInventories[userId]) return null;
+
+    const idx = this.cachedData!.userInventories[userId].findIndex((item) => item.id === id);
     if (idx === -1) return null;
 
     if (updates.name) {
       updates.name = updates.name.toLowerCase().trim();
     }
 
-    this.cachedData!.inventory[idx] = {
-      ...this.cachedData!.inventory[idx],
+    this.cachedData!.userInventories[userId][idx] = {
+      ...this.cachedData!.userInventories[userId][idx],
       ...updates
     };
 
     await this.saveData();
-    return this.cachedData!.inventory[idx];
+    return this.cachedData!.userInventories[userId][idx];
   }
 
-  static async deleteInventoryItem(id: string): Promise<boolean> {
+  static async deleteInventoryItem(id: string, userId: string = "guest"): Promise<boolean> {
     if (!this.cachedData) await this.initDb();
-    const initialLen = this.cachedData!.inventory.length;
-    this.cachedData!.inventory = this.cachedData!.inventory.filter((item) => item.id !== id);
-    if (this.cachedData!.inventory.length !== initialLen) {
+    if (!this.cachedData!.userInventories[userId]) return false;
+
+    const initialLen = this.cachedData!.userInventories[userId].length;
+    this.cachedData!.userInventories[userId] = this.cachedData!.userInventories[userId].filter((item) => item.id !== id);
+    if (this.cachedData!.userInventories[userId].length !== initialLen) {
       await this.saveData();
       return true;
     }
     return false;
   }
 
-  static async togglePantryStaple(name: string, alwaysInStock: boolean): Promise<InventoryItem> {
+  static async togglePantryStaple(name: string, alwaysInStock: boolean, userId: string = "guest"): Promise<InventoryItem> {
     if (!this.cachedData) await this.initDb();
+    if (!this.cachedData!.userInventories[userId]) {
+      this.cachedData!.userInventories[userId] = JSON.parse(JSON.stringify(defaultInventory));
+    }
+
     const normalized = name.toLowerCase().trim();
-    const idx = this.cachedData!.inventory.findIndex((item) => item.name === normalized);
+    const idx = this.cachedData!.userInventories[userId].findIndex((item) => item.name === normalized);
 
     if (idx > -1) {
-      this.cachedData!.inventory[idx].isAlwaysInStock = alwaysInStock;
+      this.cachedData!.userInventories[userId][idx].isAlwaysInStock = alwaysInStock;
       await this.saveData();
-      return this.cachedData!.inventory[idx];
+      return this.cachedData!.userInventories[userId][idx];
     } else {
-      // Create new staple
       const newItem: InventoryItem = {
         id: Math.random().toString(36).substr(2, 9),
         name: normalized,
@@ -327,50 +473,36 @@ export class DbService {
         dateAdded: new Date().toISOString(),
         isAlwaysInStock: alwaysInStock
       };
-      this.cachedData!.inventory.push(newItem);
+      this.cachedData!.userInventories[userId].push(newItem);
       await this.saveData();
       return newItem;
     }
   }
 
-  static async resetInventory(): Promise<InventoryItem[]> {
+  static async resetInventory(userId: string = "guest"): Promise<InventoryItem[]> {
     if (!this.cachedData) await this.initDb();
-    this.cachedData!.inventory = JSON.parse(JSON.stringify(defaultInventory));
-    this.cachedData!.weeklyPlan = emptyWeeklyPlan();
-    this.cachedData!.shoppingList = [];
+    this.cachedData!.userInventories[userId] = JSON.parse(JSON.stringify(defaultInventory));
+    this.cachedData!.userWeeklyPlans[userId] = emptyWeeklyPlan();
+    this.cachedData!.userShoppingLists[userId] = [];
     await this.saveData();
-    return this.cachedData!.inventory;
+    return this.cachedData!.userInventories[userId];
   }
 
-  /**
-   * Evaluates active stock matching score for recipes
-   */
   static matchRecipes(inventory: InventoryItem[]): any[] {
-    const activeNames = new Set(
-      inventory.map(item => item.name.toLowerCase().trim())
-    );
-
     return defaultRecipes.map((recipe) => {
       const neededIngs = recipe.ingredients;
       const neededStaples = recipe.pantryStaplesNeeded;
       
       const totalIngredients = [...neededIngs, ...neededStaples];
 
-      // Check which inputs are matched.
-      // An input is matched if it's in the inventory and:
-      // - Either isAlwaysInStock is true (infinite pantry staple)
-      // - Or simply listed (which represents active stock category).
       const matching = totalIngredients.filter(ing => {
-        const item = inventory.find(i => i.name === ing);
-        return item !== undefined;
+        return inventory.some(i => i.name === ing);
       });
 
       const missing = totalIngredients.filter(ing => {
-        const item = inventory.find(i => i.name === ing);
-        return item === undefined;
+        return !inventory.some(i => i.name === ing);
       });
 
-      // Match Score calculation
       const matchPercentage = totalIngredients.length > 0 
         ? parseFloat(((matching.length / totalIngredients.length) * 100).toFixed(1))
         : 0;
@@ -384,32 +516,30 @@ export class DbService {
     }).sort((a, b) => b.matchPercentage - a.matchPercentage);
   }
 
-  /**
-   * Generates a 7-day Weekly Meal Plan using Sequential Deduction
-   */
-  static generateWeeklyPlan(preserveLocked: boolean = true): { plan: WeeklyMealPlan; shopping: ShoppingItem[] } {
+  static generateWeeklyPlan(preserveLocked: boolean = true, userId: string = "guest"): { plan: WeeklyMealPlan; shopping: ShoppingItem[] } {
     if (!this.cachedData) {
       throw new Error("DB not loaded");
     }
 
-    const currentInventory = this.cachedData.inventory;
-    // Keep a simulated inventory copy.
-    // In this pool, non-staples (isAlwaysInStock === false) are consumable and can be deducted.
-    // Staples (isAlwaysInStock === true) are infinite - they are never removed from simulated inventory.
+    if (!this.cachedData.userInventories[userId]) {
+      this.cachedData.userInventories[userId] = JSON.parse(JSON.stringify(defaultInventory));
+    }
+    if (!this.cachedData.userWeeklyPlans[userId]) {
+      this.cachedData.userWeeklyPlans[userId] = emptyWeeklyPlan();
+    }
+
+    const currentInventory = this.cachedData.userInventories[userId];
     let simulatedPool = [...currentInventory];
 
     const newPlan: any = {};
     const fullMissingSet = new Set<string>();
 
-    // Process each day sequentially
     for (const day of DAYS_OF_WEEK) {
       newPlan[day] = { Breakfast: null, Lunch: null, Dinner: null };
       
-      // Determine what to do for each slot
       for (const meal of MEAL_TYPES) {
-        const existingSlot = this.cachedData.weeklyPlan[day]?.[meal];
+        const existingSlot = this.cachedData.userWeeklyPlans[userId][day]?.[meal];
         
-        // If preserveLocked is true, and the slot is locked, we preserve it.
         if (preserveLocked && existingSlot && existingSlot.locked && existingSlot.recipeId) {
           const recipe = defaultRecipes.find(r => r.id === existingSlot.recipeId);
           if (recipe) {
@@ -419,36 +549,28 @@ export class DbService {
               locked: true
             };
             
-            // Deduct ingredients for locked items too
             for (const ing of recipe.ingredients) {
               const matchedItem = simulatedPool.find(item => item.name === ing);
               if (matchedItem) {
                 if (!matchedItem.isAlwaysInStock) {
-                  // Consume it
                   simulatedPool = simulatedPool.filter(item => item.id !== matchedItem.id);
                 }
               } else {
-                // Ingredient is missing
                 fullMissingSet.add(ing);
               }
             }
-            continue; // Skip generation for locked slot
+            continue;
           }
         }
 
-        // Generate recommendation based on remaining simulated pool
-        // Perform matching on the current simulatedPool
         const matches = this.matchRecipes(simulatedPool);
         
-        // Pick a matching recipe. Let's filter out ones we already planned for today
-        // to avoid breakfast/lunch/dinner being identical helper.
         const dayAssignedRecipeIds = Object.values(newPlan[day])
           .filter((slot: any) => slot && slot.recipeId)
           .map((slot: any) => slot.recipeId);
 
         let chosenMatch = matches.find(m => !dayAssignedRecipeIds.includes(m.recipe.id));
         
-        // Fallback: If all top scores are used, just take the overall top match
         if (!chosenMatch && matches.length > 0) {
           chosenMatch = matches[0];
         }
@@ -461,29 +583,20 @@ export class DbService {
             locked: false
           };
 
-          // Simulate deduction and accumulate missing ones in smart shopping list
-          // Match checked ingredients with what we actually have in the simulated pool
-          const activeSimNames = new Set(simulatedPool.map(it => it.name));
-          
-          // Checked against the complete ingredient list
           const totalReqs = [...recipe.ingredients, ...recipe.pantryStaplesNeeded];
           
           for (const ing of totalReqs) {
-            // Find in simulated pool
             const matchedIndex = simulatedPool.findIndex(item => item.name === ing);
             if (matchedIndex > -1) {
               const matchedItem = simulatedPool[matchedIndex];
               if (!matchedItem.isAlwaysInStock) {
-                // Deduct/consume non-staple
                 simulatedPool.splice(matchedIndex, 1);
               }
             } else {
-              // It is missing from simulated pool! Add it to Shopping List
               fullMissingSet.add(ing);
             }
           }
         } else {
-          // Fallback if no recipe matches whatsoever
           newPlan[day][meal] = {
             recipeId: null,
             recipeName: null,
@@ -493,9 +606,7 @@ export class DbService {
       }
     }
 
-    // Now write down the Shopping list based on missing ingredients
     const shoppingList: ShoppingItem[] = Array.from(fullMissingSet).map((ingName, idx) => {
-      // Try to resolve clean Display Name and Category
       const matchedModelItem = defaultInventory.find(item => item.name === ingName);
       const displayName = matchedModelItem ? matchedModelItem.displayName : (ingName.charAt(0).toUpperCase() + ingName.slice(1));
       const category = matchedModelItem ? matchedModelItem.category : "Vegetables & Herbs";
@@ -508,35 +619,38 @@ export class DbService {
       };
     });
 
-    // Update DB cache
-    this.cachedData.weeklyPlan = newPlan as WeeklyMealPlan;
-    this.cachedData.shoppingList = shoppingList;
+    this.cachedData.userWeeklyPlans[userId] = newPlan as WeeklyMealPlan;
+    this.cachedData.userShoppingLists[userId] = shoppingList;
     this.saveData();
 
     return { plan: newPlan, shopping: shoppingList };
   }
 
-  static async swapMealSlot(day: keyof WeeklyMealPlan, meal: MealType, recipeId: string | null): Promise<WeeklyMealPlan> {
+  static async swapMealSlot(day: keyof WeeklyMealPlan, meal: MealType, recipeId: string | null, userId: string = "guest"): Promise<WeeklyMealPlan> {
     if (!this.cachedData) await this.initDb();
     
-    const existingSlot = this.cachedData!.weeklyPlan[day][meal];
+    if (!this.cachedData!.userWeeklyPlans[userId]) {
+      this.cachedData!.userWeeklyPlans[userId] = emptyWeeklyPlan();
+    }
+
+    const existingSlot = this.cachedData!.userWeeklyPlans[userId][day][meal];
     
     if (recipeId === null) {
-      this.cachedData!.weeklyPlan[day][meal] = {
+      this.cachedData!.userWeeklyPlans[userId][day][meal] = {
         recipeId: null,
         recipeName: null,
         locked: false
       };
     } else {
       if (existingSlot && existingSlot.recipeId === recipeId) {
-        this.cachedData!.weeklyPlan[day][meal] = {
+        this.cachedData!.userWeeklyPlans[userId][day][meal] = {
           ...existingSlot,
           locked: !existingSlot.locked
         };
       } else {
         const recipe = defaultRecipes.find(r => r.id === recipeId);
         if (recipe) {
-          this.cachedData!.weeklyPlan[day][meal] = {
+          this.cachedData!.userWeeklyPlans[userId][day][meal] = {
             recipeId: recipe.id,
             recipeName: recipe.name,
             locked: true
@@ -545,30 +659,30 @@ export class DbService {
       }
     }
 
-    // Since we've changed a slot, we MUST re-run the sequential planners starting from this slot forward!
-    // For simplicity, we trigger generateWeeklyPlan(preserveLocked=true). This will automatically preserve this slot
-    // and recalculate all active un-locked slots sequentially! This matches the exact requirement:
-    // "Allow users to manually swap out any recommended meal slot, which should re-run the matching logic from that day forward."
-    this.generateWeeklyPlan(true);
+    this.generateWeeklyPlan(true, userId);
 
-    return this.cachedData!.weeklyPlan;
+    return this.cachedData!.userWeeklyPlans[userId];
   }
 
-  static async toggleShoppingItem(id: string, completed: boolean): Promise<{ shopping: ShoppingItem[]; inventory: InventoryItem[] }> {
+  static async toggleShoppingItem(id: string, completed: boolean, userId: string = "guest"): Promise<{ shopping: ShoppingItem[]; inventory: InventoryItem[] }> {
     if (!this.cachedData) await this.initDb();
     
-    const shopItemIdx = this.cachedData!.shoppingList.findIndex(item => item.id === id);
+    if (!this.cachedData!.userShoppingLists[userId]) {
+      this.cachedData!.userShoppingLists[userId] = [];
+    }
+    if (!this.cachedData!.userInventories[userId]) {
+      this.cachedData!.userInventories[userId] = JSON.parse(JSON.stringify(defaultInventory));
+    }
+
+    const shopItemIdx = this.cachedData!.userShoppingLists[userId].findIndex(item => item.id === id);
     if (shopItemIdx > -1) {
-      const item = this.cachedData!.shoppingList[shopItemIdx];
+      const item = this.cachedData!.userShoppingLists[userId][shopItemIdx];
       item.completed = completed;
 
-      // "seamlessly transfers those items back into their active inventory."
       if (completed) {
-        // Resolve a clean name
         const normName = item.name.toLowerCase().trim();
         
-        // Add to active inventory if not already present
-        const exists = this.cachedData!.inventory.some(i => i.name === normName);
+        const exists = this.cachedData!.userInventories[userId].some(i => i.name === normName);
         if (!exists) {
           const newInvItem: InventoryItem = {
             id: Math.random().toString(36).substr(2, 9),
@@ -578,19 +692,16 @@ export class DbService {
             dateAdded: new Date().toISOString(),
             isAlwaysInStock: false
           };
-          this.cachedData!.inventory.push(newInvItem);
+          this.cachedData!.userInventories[userId].push(newInvItem);
         }
-      } else {
-        // If user unchecks, we can optionally keep it in inventory or let it stay there. Let's keep it in active inventory
-        // since checking it transfers it there once.
       }
 
       await this.saveData();
     }
 
     return {
-      shopping: this.cachedData!.shoppingList,
-      inventory: this.cachedData!.inventory
+      shopping: this.cachedData!.userShoppingLists[userId],
+      inventory: this.cachedData!.userInventories[userId]
     };
   }
 }

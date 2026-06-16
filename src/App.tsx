@@ -10,7 +10,7 @@ import {
 import InventoryTab from "./components/InventoryTab.tsx";
 import MealPlannerTab from "./components/MealPlannerTab.tsx";
 import ShoppingListTab from "./components/ShoppingListTab.tsx";
-import RecipeModal from "./components/RecipeModal.tsx";
+import RecipePage from "./components/RecipePage.tsx";
 import { 
   ChefHat, 
   Layers, 
@@ -20,7 +20,8 @@ import {
   Leaf, 
   HelpCircle,
   RefreshCw,
-  Home
+  Home,
+  LogOut
 } from "lucide-react";
 
 export default function App() {
@@ -34,55 +35,163 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Load initial data
-  useEffect(() => {
-    async function loadData() {
-      try {
-        setLoading(true);
-        setErrorMsg(null);
+  // Authentication states
+  const [token, setToken] = useState<string | null>(localStorage.getItem("mpishi_token"));
+  const [user, setUser] = useState<{ id: string; username: string; displayName: string } | null>(null);
 
-        // Fetch active stock
-        const resInv = await fetch("/api/inventory");
-        if (!resInv.ok) throw new Error("Failed to load inventory stock");
-        const dataInv = await resInv.json();
-        setInventory(dataInv);
+  // Auth form states
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authType, setAuthType] = useState<"login" | "register">("login");
+  const [authUsername, setAuthUsername] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authDisplayName, setAuthDisplayName] = useState("");
+  const [authError, setAuthError] = useState<string | null>(null);
 
-        // Fetch recipes
-        const resRec = await fetch("/api/recipes");
-        if (!resRec.ok) throw new Error("Failed to load kitchen recipes");
-        const dataRec = await resRec.json();
-        setRecipes(dataRec);
-
-        // Fetch weekly plan & shopping checklist
-        const resPlan = await fetch("/api/mealplan");
-        if (!resPlan.ok) throw new Error("Failed to load meal calendar");
-        const dataPlan = await resPlan.json();
-        setWeeklyPlan(dataPlan.plan);
-        setShoppingList(dataPlan.shoppingList);
-
-      } catch (err: any) {
-        console.error(err);
-        setErrorMsg(err.message || "An unexpected error occurred while loading kitchen parameters.");
-      } finally {
-        setLoading(false);
-      }
+  // Authenticated fetch helper
+  const authFetch = async (url: string, options: RequestInit = {}) => {
+    const headers = {
+      ...(options.headers || {}),
+      "Content-Type": "application/json"
+    } as any;
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
     }
+    return fetch(url, { ...options, headers });
+  };
+
+  // Dedicated data loader to support dynamically switching users/guest token
+  const loadData = async () => {
+    try {
+      setLoading(true);
+      setErrorMsg(null);
+
+      // 1. Fetch / verify active user identity if token exists
+      if (token) {
+        try {
+          const resMe = await fetch("/api/auth/me", {
+            headers: { "Authorization": `Bearer ${token}` }
+          });
+          if (resMe.ok) {
+            const dataMe = await resMe.json();
+            if (dataMe.user) {
+              setUser(dataMe.user);
+            } else {
+              // Token has expired
+              setToken(null);
+              localStorage.removeItem("mpishi_token");
+              setUser(null);
+            }
+          } else {
+            setToken(null);
+            localStorage.removeItem("mpishi_token");
+            setUser(null);
+          }
+        } catch (e) {
+          console.error("Me API verify failed: ", e);
+        }
+      } else {
+        setUser(null);
+      }
+
+      // 2. Fetch inventory stock
+      const resInv = await fetch("/api/inventory", {
+        headers: token ? { "Authorization": `Bearer ${token}` } : {}
+      });
+      if (!resInv.ok) throw new Error("Failed to load inventory stock");
+      const dataInv = await resInv.json();
+      setInventory(dataInv);
+
+      // 3. Fetch recipes
+      const resRec = await fetch("/api/recipes");
+      if (!resRec.ok) throw new Error("Failed to load kitchen recipes");
+      const dataRec = await resRec.json();
+      setRecipes(dataRec);
+
+      // 4. Fetch weekly plan & shopping checklist
+      const resPlan = await fetch("/api/mealplan", {
+        headers: token ? { "Authorization": `Bearer ${token}` } : {}
+      });
+      if (!resPlan.ok) throw new Error("Failed to load meal calendar");
+      const dataPlan = await resPlan.json();
+      setWeeklyPlan(dataPlan.plan);
+      setShoppingList(dataPlan.shoppingList);
+
+    } catch (err: any) {
+      console.error(err);
+      setErrorMsg(err.message || "An unexpected error occurred while loading kitchen parameters.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Core Sync Effect
+  useEffect(() => {
     loadData();
-  }, []);
+  }, [token]);
+
+  // Auth Handlers
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      setAuthError(null);
+      const url = authType === "login" ? "/api/auth/login" : "/api/auth/register";
+      const payload = authType === "login"
+        ? { username: authUsername, password: authPassword }
+        : { username: authUsername, password: authPassword, displayName: authDisplayName };
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Authentication failed. Tafadhali jaribu tena.");
+      }
+
+      localStorage.setItem("mpishi_token", data.token);
+      setToken(data.token);
+      setUser(data.user);
+      setShowAuthModal(false);
+
+      // Reset forms
+      setAuthUsername("");
+      setAuthPassword("");
+      setAuthDisplayName("");
+    } catch (err: any) {
+      setAuthError(err.message);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      setLoading(true);
+      await fetch("/api/auth/logout", {
+        method: "POST",
+        headers: token ? { "Authorization": `Bearer ${token}` } : {}
+      });
+    } catch (e) {
+      console.error("Logout request failed silently: ", e);
+    } finally {
+      localStorage.removeItem("mpishi_token");
+      setToken(null);
+      setUser(null);
+      setLoading(false);
+    }
+  };
 
   // API Callbacks for Inventory CRUD
   const handleAddItem = async (item: { name: string; displayName: string; category: string; expirationDate?: string; isAlwaysInStock: boolean }) => {
     try {
       setErrorMsg(null);
-      const tempRes = await fetch("/api/inventory", {
+      const tempRes = await authFetch("/api/inventory", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(item)
       });
       if (!tempRes.ok) throw new Error("Server rejected inventory upload");
       const newItem = await tempRes.json();
 
-      // We append or update state instantly
       setInventory((prev) => {
         const idx = prev.findIndex(i => i.name === newItem.name && i.isAlwaysInStock === newItem.isAlwaysInStock);
         if (idx > -1) {
@@ -93,8 +202,7 @@ export default function App() {
         return [...prev, newItem];
       });
 
-      // Since inventory changed, let's re-sync the shopping checklist & matching scores silently in backend
-      const syncRes = await fetch("/api/mealplan");
+      const syncRes = await authFetch("/api/mealplan");
       if (syncRes.ok) {
         const syncData = await syncRes.json();
         setWeeklyPlan(syncData.plan);
@@ -108,9 +216,8 @@ export default function App() {
   const handleUpdateItem = async (id: string, updates: Partial<InventoryItem>) => {
     try {
       setErrorMsg(null);
-      const res = await fetch(`/api/inventory/${id}`, {
+      const res = await authFetch(`/api/inventory/${id}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(updates)
       });
       if (!res.ok) throw new Error("Failed to sync item update");
@@ -118,8 +225,7 @@ export default function App() {
 
       setInventory((prev) => prev.map((item) => (item.id === id ? updatedItem : item)));
 
-      // Re-trigger background plan details to ensure scores align
-      const syncRes = await fetch("/api/mealplan");
+      const syncRes = await authFetch("/api/mealplan");
       if (syncRes.ok) {
         const syncData = await syncRes.json();
         setWeeklyPlan(syncData.plan);
@@ -133,12 +239,12 @@ export default function App() {
   const handleDeleteItem = async (id: string) => {
     try {
       setErrorMsg(null);
-      const res = await fetch(`/api/inventory/${id}`, { method: "DELETE" });
+      const res = await authFetch(`/api/inventory/${id}`, { method: "DELETE" });
       if (!res.ok) throw new Error("Failed to delete stock element");
 
       setInventory((prev) => prev.filter((item) => item.id !== id));
 
-      const syncRes = await fetch("/api/mealplan");
+      const syncRes = await authFetch("/api/mealplan");
       if (syncRes.ok) {
         const syncData = await syncRes.json();
         setWeeklyPlan(syncData.plan);
@@ -152,9 +258,8 @@ export default function App() {
   const handleToggleStaple = async (name: string, alwaysInStock: boolean) => {
     try {
       setErrorMsg(null);
-      const res = await fetch("/api/pantry/toggle", {
+      const res = await authFetch("/api/pantry/toggle", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, alwaysInStock })
       });
       if (!res.ok) throw new Error("Failed to toggle pantry availability");
@@ -165,8 +270,7 @@ export default function App() {
         return [...filtered, updatedItem];
       });
 
-      // Refetch plan details to adjust deduction outputs
-      const syncRes = await fetch("/api/mealplan");
+      const syncRes = await authFetch("/api/mealplan");
       if (syncRes.ok) {
         const syncData = await syncRes.json();
         setWeeklyPlan(syncData.plan);
@@ -181,14 +285,13 @@ export default function App() {
     try {
       setLoading(true);
       setErrorMsg(null);
-      const res = await fetch("/api/inventory/reset", { method: "POST" });
+      const res = await authFetch("/api/inventory/reset", { method: "POST" });
       if (!res.ok) throw new Error("Failed to execute reset process");
       const data = await res.json();
       
       setInventory(data.inventory);
       
-      // Load empty calendar & cleared lists
-      const resPlan = await fetch("/api/mealplan");
+      const resPlan = await authFetch("/api/mealplan");
       if (resPlan.ok) {
         const d = await resPlan.json();
         setWeeklyPlan(d.plan);
@@ -206,9 +309,8 @@ export default function App() {
     try {
       setLoading(true);
       setErrorMsg(null);
-      const res = await fetch("/api/mealplan/generate", {
+      const res = await authFetch("/api/mealplan/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ preserveLocked })
       });
       if (!res.ok) throw new Error("Failed to compile weekly plan simulation");
@@ -217,7 +319,7 @@ export default function App() {
       if (data.success) {
         setWeeklyPlan(data.plan);
         setShoppingList(data.shoppingList);
-        setActiveTab("mealplan"); // go to meal plan tab to show it off!
+        setActiveTab("mealplan");
       }
     } catch (e: any) {
       setErrorMsg(e.message);
@@ -229,9 +331,8 @@ export default function App() {
   const handleSwapSlot = async (day: keyof WeeklyMealPlan, meal: MealType, recipeId: string | null) => {
     try {
       setErrorMsg(null);
-      const res = await fetch("/api/mealplan/swap", {
+      const res = await authFetch("/api/mealplan/swap", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ day, meal, recipeId })
       });
       if (!res.ok) throw new Error("Failed to swap meal slot");
@@ -250,9 +351,8 @@ export default function App() {
   const handleToggleShoppingItem = async (id: string, completed: boolean) => {
     try {
       setErrorMsg(null);
-      const res = await fetch("/api/shopping/toggle", {
+      const res = await authFetch("/api/shopping/toggle", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id, completed })
       });
       if (!res.ok) throw new Error("Failed to cross off item");
@@ -268,6 +368,16 @@ export default function App() {
   };
 
   const pendingShoppingCount = shoppingList.filter(item => !item.completed).length;
+
+  if (selectedRecipe) {
+    return (
+      <RecipePage
+        recipe={selectedRecipe}
+        inventory={inventory}
+        onClose={() => setSelectedRecipe(null)}
+      />
+    );
+  }
 
   return (
     <div className="bg-cream text-earth min-h-screen flex flex-col font-sans selection:bg-mustard/20 antialiased">
@@ -285,6 +395,40 @@ export default function App() {
           >
             Dismiss
           </button>
+        </div>
+      )}
+
+      {/* Guest Mode Notice banner */}
+      {!user && (
+        <div className="bg-mustard/15 border-b border-mustard/30 px-6 py-3 flex flex-wrap justify-between items-center gap-3 text-xs text-deep-green font-bold font-sans">
+          <div className="flex items-center gap-2">
+            <span className="bg-mustard text-deep-green px-2 py-0.5 rounded-md text-[10px] tracking-wide uppercase font-extrabold shadow-sm">Guest Mode</span>
+            <span>You are currently managing the default trial kitchen. Sign up to secure your personalized stock, pantry staples, and shopping list!</span>
+          </div>
+          <div className="flex gap-2">
+            <button
+              id="header-login-btn"
+              onClick={() => {
+                setAuthType("login");
+                setAuthError(null);
+                setShowAuthModal(true);
+              }}
+              className="bg-deep-green hover:bg-deep-green/90 text-white px-3.5 py-1.5 rounded-lg transition-all cursor-pointer shadow-xs active:scale-95 text-[11px]"
+            >
+              Log In
+            </button>
+            <button
+              id="header-signup-btn"
+              onClick={() => {
+                setAuthType("register");
+                setAuthError(null);
+                setShowAuthModal(true);
+              }}
+              className="bg-mustard hover:bg-mustard/90 text-deep-green px-3.5 py-1.5 rounded-lg transition-all cursor-pointer shadow-xs active:scale-95 text-[11px]"
+            >
+              Sign Up
+            </button>
+          </div>
         </div>
       )}
 
@@ -308,6 +452,26 @@ export default function App() {
               </div>
             </div>
 
+            {/* Profile Block (For logged-in users) */}
+            {user && (
+              <div className="hidden sm:flex items-center gap-3 bg-cream/60 border border-deep-green/5 px-4 py-2 rounded-2xl">
+                <div className="w-8 h-8 rounded-full bg-deep-green text-cream flex items-center justify-center font-bold text-sm border-2 border-mustard">
+                  {user.displayName.charAt(0).toUpperCase()}
+                </div>
+                <div className="text-left">
+                  <p className="text-[10px] uppercase tracking-wider text-earth/60 font-bold font-sans">Jiko Owner</p>
+                  <p className="text-xs font-bold text-deep-green font-sans">{user.displayName}</p>
+                </div>
+                <button
+                  id="avatar-logout-btn"
+                  onClick={handleLogout}
+                  className="ml-2 text-[10px] uppercase tracking-wider text-terracotta hover:text-terracotta/80 font-bold underline transition-all cursor-pointer"
+                >
+                  Logout
+                </button>
+              </div>
+            )}
+
             {/* Navigation Tabs */}
             <nav className="flex bg-cream border border-deep-green/5 p-1 rounded-xl font-sans text-xs font-bold gap-0.5">
               <button
@@ -316,14 +480,15 @@ export default function App() {
                   setActiveTab("inventory");
                   setErrorMsg(null);
                 }}
-                className={`flex items-center gap-1.5 py-2 px-4 rounded-lg transition-all border border-transparent cursor-pointer ${
+                className={`flex items-center gap-1.5 py-2 px-3 sm:px-4 rounded-lg transition-all border border-transparent cursor-pointer ${
                   activeTab === "inventory"
                     ? "bg-deep-green text-white shadow-xs"
                     : "text-deep-green/60 hover:text-deep-green hover:bg-white/50"
                 }`}
               >
                 <Layers className="w-4 h-4" />
-                <span>Pantry (Stoo)</span>
+                <span className="hidden sm:inline">Pantry (Stoo)</span>
+                <span className="sm:hidden">Pantry</span>
               </button>
 
               <button
@@ -332,14 +497,14 @@ export default function App() {
                   setActiveTab("mealplan");
                   setErrorMsg(null);
                 }}
-                className={`flex items-center gap-1.5 py-2 px-4 rounded-lg transition-all border border-transparent cursor-pointer ${
+                className={`flex items-center gap-1.5 py-2 px-3 sm:px-4 rounded-lg transition-all border border-transparent cursor-pointer ${
                   activeTab === "mealplan"
                     ? "bg-deep-green text-white shadow-xs"
                     : "text-deep-green/60 hover:text-deep-green hover:bg-white/50"
                 }`}
               >
                 <CalendarDays className="w-4 h-4" />
-                <span>Meal Planner</span>
+                <span>Planner</span>
               </button>
 
               <button
@@ -348,20 +513,32 @@ export default function App() {
                   setActiveTab("shopping");
                   setErrorMsg(null);
                 }}
-                className={`flex items-center gap-1.5 py-2 px-4 rounded-lg transition-all border border-transparent cursor-pointer relative ${
+                className={`flex items-center gap-1.5 py-2 px-3 sm:px-4 rounded-lg transition-all border border-transparent cursor-pointer relative ${
                   activeTab === "shopping"
                     ? "bg-deep-green text-white shadow-xs"
                     : "text-deep-green/60 hover:text-deep-green hover:bg-white/50"
                 }`}
               >
                 <ShoppingBag className="w-4 h-4" />
-                <span>Shopping List</span>
+                <span className="hidden sm:inline">Shopping List</span>
+                <span className="sm:hidden">Shopping</span>
                 {pendingShoppingCount > 0 && (
                   <span className="absolute -top-1.5 -right-1 text-[9px] bg-terracotta text-white rounded-full w-4.5 h-4.5 flex items-center justify-center font-bold font-sans ring-1 ring-white shadow-xs">
                     {pendingShoppingCount}
                   </span>
                 )}
               </button>
+
+              {user && (
+                <button
+                  id="tab-logout-btn"
+                  onClick={handleLogout}
+                  className="sm:hidden flex items-center justify-center p-2 text-terracotta hover:bg-terracotta/10 rounded-lg cursor-pointer transition-all"
+                  title="Logout"
+                >
+                  <LogOut className="w-4 h-4" />
+                </button>
+              )}
             </nav>
           </div>
         </div>
@@ -419,13 +596,134 @@ export default function App() {
         </div>
       </footer>
 
-      {/* Recipe Modal Overlay */}
-      {selectedRecipe && (
-        <RecipeModal
-          recipe={selectedRecipe}
-          inventory={inventory}
-          onClose={() => setSelectedRecipe(null)}
-        />
+
+
+      {/* Authentic, Beautiful Login/Register Modal */}
+      {showAuthModal && (
+        <div className="fixed inset-0 bg-neutral-900/60 backdrop-blur-md flex items-center justify-center z-50 animate-fade-in p-4">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-sm w-full overflow-hidden border border-deep-green/10 transform scale-100 transition-all duration-300">
+            {/* Modal Header */}
+            <div className="bg-deep-green p-6 text-white text-center relative">
+              <button 
+                id="close-auth-modal-btn"
+                onClick={() => {
+                  setShowAuthModal(false);
+                  setAuthError(null);
+                }}
+                className="absolute top-4 right-4 text-white/70 hover:text-white bg-white/10 hover:bg-white/20 p-1 rounded-full transition-all cursor-pointer text-xs"
+              >
+                ✕
+              </button>
+              <ChefHat className="w-8 h-8 mx-auto text-mustard mb-2" />
+              <h2 className="text-xl font-bold font-display tracking-tight">
+                {authType === "login" ? "Karibu Jikoni" : "Jisajili Mpishi"}
+              </h2>
+              <p className="text-cream/80 text-[11px] mt-1 font-sans">
+                {authType === "login" 
+                  ? "Access your custom Kenya kitchen inventory & planners" 
+                  : "Join Mpishi to save custom stock, pantry staples, and recipes!"}
+              </p>
+            </div>
+
+            {/* Modal Body */}
+            <form onSubmit={handleAuthSubmit} className="p-6 space-y-4">
+              {authError && (
+                <div className="bg-terracotta/10 text-terracotta p-3 rounded-xl text-xs font-bold font-sans border border-terracotta/20 animate-shake">
+                  ⚠ {authError}
+                </div>
+              )}
+
+              {authType === "register" && (
+                <div className="space-y-1">
+                  <label className="block text-[10px] uppercase tracking-wider font-bold text-earth/60 font-sans" htmlFor="reg-displayName">
+                    Display Name
+                  </label>
+                  <input
+                    id="reg-displayName"
+                    type="text"
+                    required
+                    value={authDisplayName}
+                    onChange={(e) => setAuthDisplayName(e.target.value)}
+                    placeholder="e.g. Mama Ken"
+                    className="w-full bg-cream border border-deep-green/10 rounded-xl px-4 py-2.5 text-xs focus:outline-none focus:ring-2 focus:ring-mustard/30 text-earth font-sans"
+                  />
+                </div>
+              )}
+
+              <div className="space-y-1">
+                <label className="block text-[10px] uppercase tracking-wider font-bold text-earth/60 font-sans" htmlFor="auth-username">
+                  Username
+                </label>
+                <input
+                  id="auth-username"
+                  type="text"
+                  required
+                  value={authUsername}
+                  onChange={(e) => setAuthUsername(e.target.value)}
+                  placeholder="e.g. mamaken77"
+                  className="w-full bg-cream border border-deep-green/10 rounded-xl px-4 py-2.5 text-xs focus:outline-none focus:ring-2 focus:ring-mustard/30 text-earth font-sans lowercase"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-[10px] uppercase tracking-wider font-bold text-earth/60 font-sans" htmlFor="auth-password">
+                  Password
+                </label>
+                <input
+                  id="auth-password"
+                  type="password"
+                  required
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full bg-cream border border-deep-green/10 rounded-xl px-4 py-2.5 text-xs focus:outline-none focus:ring-2 focus:ring-mustard/30 text-earth font-sans"
+                />
+              </div>
+
+              <button
+                id="submit-auth-btn"
+                type="submit"
+                className="w-full bg-mustard hover:bg-mustard/90 text-deep-green font-extrabold py-3 px-4 rounded-xl shadow-xs transition-all text-xs tracking-wide flex items-center justify-center gap-2 cursor-pointer font-sans"
+              >
+                <span>{authType === "login" ? "Ingia (Log In)" : "Jisajili (Sign Up)"}</span>
+              </button>
+
+              <div className="text-center text-[11px] text-earth/60 pt-2 font-sans">
+                {authType === "login" ? (
+                  <p>
+                    New to Mpishi?{" "}
+                    <button
+                      id="toggle-auth-reg-btn"
+                      type="button"
+                      onClick={() => {
+                        setAuthType("register");
+                        setAuthError(null);
+                      }}
+                      className="text-deep-green font-bold underline hover:text-deep-green/80 cursor-pointer"
+                    >
+                      Create an account
+                    </button>
+                  </p>
+                ) : (
+                  <p>
+                    Already have an account?{" "}
+                    <button
+                      id="toggle-auth-login-btn"
+                      type="button"
+                      onClick={() => {
+                        setAuthType("login");
+                        setAuthError(null);
+                      }}
+                      className="text-deep-green font-bold underline hover:text-deep-green/80 cursor-pointer"
+                    >
+                      Sign In
+                    </button>
+                  </p>
+                )}
+              </div>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -15,12 +15,128 @@ async function startServer() {
   await DbService.initDb();
   console.log("Mpishi Database service ready.");
 
-  // API Routes
+  // Auth Helper / Middleware
+  const getUserId = async (req: express.Request): Promise<string> => {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const token = authHeader.substring(7);
+      const userId = await DbService.getUserIdFromSession(token);
+      if (userId) {
+        return userId;
+      }
+    }
+    return "guest";
+  };
+
+  // --- Auth API ---
+  
+  // Register
+  app.post("/api/auth/register", async (req, res) => {
+    try {
+      const { username, password, displayName } = req.body;
+      if (!username || !password) {
+        return res.status(400).json({ error: "Username and password are required." });
+      }
+      if (username.trim().length < 3 || password.length < 4) {
+        return res.status(400).json({ error: "Username must be at least 3 chars; password at least 4 chars." });
+      }
+      
+      const existingUser = await DbService.findUserByUsername(username);
+      if (existingUser) {
+        return res.status(400).json({ error: "Username is already taken." });
+      }
+
+      const user = await DbService.createUser(username, password, displayName || username);
+      const token = await DbService.createSession(user.id);
+
+      res.status(201).json({
+        token,
+        user: {
+          id: user.id,
+          username: user.username,
+          displayName: user.displayName
+        }
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Login
+  app.post("/api/auth/login", async (req, res) => {
+    try {
+      const { username, password } = req.body;
+      if (!username || !password) {
+        return res.status(400).json({ error: "Username and password are required." });
+      }
+
+      const user = await DbService.findUserByUsername(username);
+      if (!user) {
+        return res.status(401).json({ error: "Invalid username or password." });
+      }
+
+      const crypto = await import("crypto");
+      const computedHash = crypto.pbkdf2Sync(password, user.salt, 1000, 64, "sha512").toString("hex");
+      if (computedHash !== user.passwordHash) {
+        return res.status(401).json({ error: "Invalid username or password." });
+      }
+
+      const token = await DbService.createSession(user.id);
+      res.json({
+        token,
+        user: {
+          id: user.id,
+          username: user.username,
+          displayName: user.displayName
+        }
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Logout
+  app.post("/api/auth/logout", async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith("Bearer ")) {
+        const token = authHeader.substring(7);
+        await DbService.deleteSession(token);
+      }
+      res.json({ success: true, message: "Logged out successfully." });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Get current user profile from token
+  app.get("/api/auth/me", async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith("Bearer ")) {
+        const token = authHeader.substring(7);
+        const userId = await DbService.getUserIdFromSession(token);
+        if (userId) {
+          const user = await DbService.getUserById(userId);
+          if (user) {
+            return res.json({ user });
+          }
+        }
+      }
+      res.json({ user: null });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+
+  // API Kitchen Routes
   
   // 1. GET current stock (including toggles)
   app.get("/api/inventory", async (req, res) => {
     try {
-      const items = await DbService.getInventory();
+      const userId = await getUserId(req);
+      const items = await DbService.getInventory(userId);
       res.json(items);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -30,6 +146,7 @@ async function startServer() {
   // 2. ADD stock item
   app.post("/api/inventory", async (req, res) => {
     try {
+      const userId = await getUserId(req);
       const { name, displayName, category, expirationDate, isAlwaysInStock } = req.body;
       if (!name || !displayName || !category) {
         return res.status(400).json({ error: "Missing required fields: name, displayName, category" });
@@ -40,7 +157,7 @@ async function startServer() {
         category,
         expirationDate,
         isAlwaysInStock: !!isAlwaysInStock
-      });
+      }, userId);
       res.status(201).json(newItem);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -50,9 +167,10 @@ async function startServer() {
   // 3. EDIT stock item
   app.put("/api/inventory/:id", async (req, res) => {
     try {
+      const userId = await getUserId(req);
       const { id } = req.params;
       const updates = req.body;
-      const updated = await DbService.updateInventoryItem(id, updates);
+      const updated = await DbService.updateInventoryItem(id, updates, userId);
       if (!updated) {
         return res.status(404).json({ error: "Inventory item not found" });
       }
@@ -65,8 +183,9 @@ async function startServer() {
   // 4. DELETE stock item
   app.delete("/api/inventory/:id", async (req, res) => {
     try {
+      const userId = await getUserId(req);
       const { id } = req.params;
-      const deleted = await DbService.deleteInventoryItem(id);
+      const deleted = await DbService.deleteInventoryItem(id, userId);
       if (!deleted) {
         return res.status(404).json({ error: "Inventory item not found" });
       }
@@ -79,11 +198,12 @@ async function startServer() {
   // 5. TOGGLE pantry staples Always in stock
   app.post("/api/pantry/toggle", async (req, res) => {
     try {
+      const userId = await getUserId(req);
       const { name, alwaysInStock } = req.body;
       if (!name) {
         return res.status(400).json({ error: "Missing name" });
       }
-      const item = await DbService.togglePantryStaple(name, alwaysInStock);
+      const item = await DbService.togglePantryStaple(name, alwaysInStock, userId);
       res.json(item);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -93,7 +213,8 @@ async function startServer() {
   // 6. RESET testing pool
   app.post("/api/inventory/reset", async (req, res) => {
     try {
-      const items = await DbService.resetInventory();
+      const userId = await getUserId(req);
+      const items = await DbService.resetInventory(userId);
       res.json({ success: true, message: "Inventory pools reset to Kenyan kitchen default test values.", inventory: items });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -113,9 +234,9 @@ async function startServer() {
   // 8. POST match available inventory against recipes database
   app.post("/api/recipes/match", async (req, res) => {
     try {
+      const userId = await getUserId(req);
       const { inventory } = req.body;
-      // If client sends specific inventory, use it; otherwise read database inventory
-      const currentInv = inventory || await DbService.getInventory();
+      const currentInv = inventory || await DbService.getInventory(userId);
       const matches = DbService.matchRecipes(currentInv);
       res.json(matches);
     } catch (err: any) {
@@ -126,8 +247,9 @@ async function startServer() {
   // 9. GET weekly plan
   app.get("/api/mealplan", async (req, res) => {
     try {
-      const plan = await DbService.getWeeklyPlan();
-      const shopping = await DbService.getShoppingList();
+      const userId = await getUserId(req);
+      const plan = await DbService.getWeeklyPlan(userId);
+      const shopping = await DbService.getShoppingList(userId);
       res.json({ plan, shoppingList: shopping });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -137,8 +259,9 @@ async function startServer() {
   // 10. GENERATE 7-day meal plan
   app.post("/api/mealplan/generate", async (req, res) => {
     try {
+      const userId = await getUserId(req);
       const { preserveLocked } = req.body;
-      const result = DbService.generateWeeklyPlan(preserveLocked !== false);
+      const result = DbService.generateWeeklyPlan(preserveLocked !== false, userId);
       res.json({ 
         success: true, 
         plan: result.plan, 
@@ -152,12 +275,13 @@ async function startServer() {
   // 11. SWAP a slot
   app.post("/api/mealplan/swap", async (req, res) => {
     try {
+      const userId = await getUserId(req);
       const { day, meal, recipeId } = req.body as { day: typeof DAYS_OF_WEEK[number]; meal: MealType; recipeId: string | null };
       if (!day || !meal) {
         return res.status(400).json({ error: "Missing day or meal type" });
       }
-      const updatedPlan = await DbService.swapMealSlot(day, meal, recipeId);
-      const shoppingList = await DbService.getShoppingList();
+      const updatedPlan = await DbService.swapMealSlot(day, meal, recipeId, userId);
+      const shoppingList = await DbService.getShoppingList(userId);
       res.json({ success: true, plan: updatedPlan, shoppingList });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -167,7 +291,8 @@ async function startServer() {
   // 12. GET dynamic shopping list
   app.get("/api/shopping", async (req, res) => {
     try {
-      const shopping = await DbService.getShoppingList();
+      const userId = await getUserId(req);
+      const shopping = await DbService.getShoppingList(userId);
       res.json(shopping);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -177,11 +302,12 @@ async function startServer() {
   // 13. TOGGLE shopping list item purchased (completed)
   app.post("/api/shopping/toggle", async (req, res) => {
     try {
+      const userId = await getUserId(req);
       const { id, completed } = req.body;
       if (!id) {
         return res.status(400).json({ error: "Missing shopping list item id" });
       }
-      const result = await DbService.toggleShoppingItem(id, !!completed);
+      const result = await DbService.toggleShoppingItem(id, !!completed, userId);
       res.json({ success: true, shoppingList: result.shopping, inventory: result.inventory });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

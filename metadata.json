@@ -1,6 +1,0 @@
-{
-  "name": "Mpishi",
-  "description": "Smart Inventory Management and Weekly Meal Planning Assistant tailored for Kenyan kitchens.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}

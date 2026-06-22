@@ -16,7 +16,9 @@ const {
     addDepartment,
     addLocation,
     addAsset,
-    getSetupData
+    getSetupData,
+    getTechnicianRanking,
+    getTechnicianHistory
 } = require('../controllers/controller');
 // ==========================================
 // AUTHENTICATION & USER MANAGEMENT ROUTES
@@ -48,4 +50,8 @@ router.get('/setup-data', getSetupData);
 router.post('/departments', protect, addDepartment);
 router.post('/locations', protect, addLocation);
 router.post('/assets', protect, addAsset);
+
+//reports
+router.get('/reports/technician-ranking', protect, getTechnicianRanking);
+router.get('/reports/technician-history/:techId', protect, getTechnicianHistory);
 module.exports = router;

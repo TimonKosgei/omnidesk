@@ -1,6 +1,6 @@
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const { User, Ticket, Asset, Department, Location } = require('../models/model');
+const { User, Ticket, Asset, Department, Location } = require('../models/model'); 
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -103,7 +103,7 @@ const getUsers = async (req, res) => {
 const createTicket = async (req, res) => {
     try {
         const { title, description, department, location, asset, priority } = req.body;
-        const reportedBy = req.user.id; // Extracted from auth middleware
+        const reportedBy = req.user._id; // Fixed: Adjusted to match internal object syntax uniformly
 
         if (!title || !description || !department || !location) {
             return res.status(400).json({ success: false, message: "Please provide all required fields." });
@@ -133,9 +133,8 @@ const getTickets = async (req, res) => {
     try {
         let query = {};
 
-        // If the user is plain staff, restrict them to their own logged issues
         if (req.user.role === "staff") {
-            query.reportedBy = req.user.id;
+            query.reportedBy = req.user._id; // Fixed: Adjusted target parameter query identifier
         } else if (req.query.status) {
             query.status = req.query.status;
         }
@@ -154,9 +153,6 @@ const getTickets = async (req, res) => {
     }
 };
 
-// @desc    Update ticket lifecycle status / Assign Tech
-// @route   PUT /api/tickets/:id
-// @access  Private (Technician/Supervisor/Admin)
 // @desc    Update ticket lifecycle status / Log resolution notes
 // @route   PUT /api/tickets/:id
 // @access  Private (Technician/Supervisor/Admin)
@@ -178,8 +174,7 @@ const updateTicket = async (req, res) => {
             ticket.status = "assigned";
         }
 
-        // 💡 ADVANCED AUTOMATION: If ticket status is being changed to resolved, 
-        // automatically push an entry into the asset's maintenance history block
+        // Automatic Maintenance Ingestion Trigger Hook
         if ((status === "resolved" || status === "closed") && ticket.asset) {
             await Asset.findByIdAndUpdate(ticket.asset, {
                 $push: {
@@ -221,7 +216,7 @@ const addComment = async (req, res) => {
         }
 
         ticket.comments.push({
-            user: req.user.id,
+            user: req.user._id, // Fixed: Swapped to document identifier format matches
             message: message
         });
 
@@ -232,6 +227,9 @@ const addComment = async (req, res) => {
     }
 };
 
+// @desc    Add a new department
+// @route   POST /api/departments
+// @access  Private (Admin)
 const addDepartment = async (req, res) => {
     try {
         const { name, description } = req.body;
@@ -286,7 +284,7 @@ const addAsset = async (req, res) => {
 
 // @desc    Get setup data for dropdowns (Helper for frontend forms)
 // @route   GET /api/setup-data
-// @access  Public (Needed during user registration dropdown layout)
+// @access  Public
 const getSetupData = async (req, res) => {
     try {
         const departments = await Department.find().select('name');
@@ -297,6 +295,80 @@ const getSetupData = async (req, res) => {
     }
 };
 
+// @desc    Get technician ranking by fulfilled ticket volume
+// @route   GET /api/reports/technician-ranking
+// @access  Private (Supervisor/Admin)
+const getTechnicianRanking = async (req, res) => {
+    try {
+        // Only allow supervisors or admins to query management reports
+        if (req.user.role !== 'supervisor' && req.user.role !== 'admin') {
+            return res.status(403).json({ success: false, message: "Access denied." });
+        }
+
+        const ranking = await Ticket.aggregate([
+            { 
+                $match: { 
+                    status: { $in: ["resolved", "closed"] }, 
+                    assignedTechnician: { $exists: true, $ne: null } 
+                } 
+            },
+            { 
+                $group: { 
+                    _id: "$assignedTechnician", 
+                    fulfilledCount: { $sum: 1 } 
+                } 
+            },
+            { $sort: { fulfilledCount: -1 } },
+            { 
+                $lookup: { 
+                    from: "users", // Matches MongoDB users collection name
+                    localField: "_id", 
+                    foreignField: "_id", 
+                    as: "techDetails" 
+                } 
+            },
+            { $unwind: "$techDetails" },
+            {
+                $project: {
+                    _id: 1,
+                    fulfilledCount: 1,
+                    name: "$techDetails.name",
+                    email: "$techDetails.email"
+                }
+            }
+        ]);
+
+        res.status(200).json({ success: true, data: ranking });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// @desc    Get complete resolved history for a specific technician
+// @route   GET /api/reports/technician-history/:techId
+// @access  Private (Supervisor/Admin)
+const getTechnicianHistory = async (req, res) => {
+    try {
+        const { techId } = req.params;
+
+        if (req.user.role !== 'supervisor' && req.user.role !== 'admin') {
+            return res.status(403).json({ success: false, message: "Access denied." });
+        }
+
+        const ticketHistory = await Ticket.find({ 
+            assignedTechnician: techId, 
+            status: { $in: ["resolved", "closed"] } 
+        })
+        .populate("reportedBy", "name email")
+        .populate("department", "name")
+        .populate("location", "building floor room")
+        .sort({ updatedAt: -1 });
+
+        res.status(200).json({ success: true, count: ticketHistory.length, data: ticketHistory });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
 
 module.exports = {
     loginUser,
@@ -309,5 +381,7 @@ module.exports = {
     addDepartment,
     addLocation,
     addAsset,
-    getSetupData
+    getSetupData,
+    getTechnicianRanking,
+    getTechnicianHistory
 };

@@ -157,6 +157,9 @@ const getTickets = async (req, res) => {
 // @desc    Update ticket lifecycle status / Assign Tech
 // @route   PUT /api/tickets/:id
 // @access  Private (Technician/Supervisor/Admin)
+// @desc    Update ticket lifecycle status / Log resolution notes
+// @route   PUT /api/tickets/:id
+// @access  Private (Technician/Supervisor/Admin)
 const updateTicket = async (req, res) => {
     try {
         const { id } = req.params;
@@ -171,9 +174,21 @@ const updateTicket = async (req, res) => {
         if (assignedTechnician) ticket.assignedTechnician = assignedTechnician;
         if (resolutionNotes !== undefined) ticket.resolutionNotes = resolutionNotes;
 
-        // Auto shift status from pending to assigned if a technician gets attached
         if (assignedTechnician && ticket.status === "pending") {
             ticket.status = "assigned";
+        }
+
+        // 💡 ADVANCED AUTOMATION: If ticket status is being changed to resolved, 
+        // automatically push an entry into the asset's maintenance history block
+        if ((status === "resolved" || status === "closed") && ticket.asset) {
+            await Asset.findByIdAndUpdate(ticket.asset, {
+                $push: {
+                    maintenanceHistory: {
+                        technician: req.user._id,
+                        notes: resolutionNotes || `Ticket resolved: ${ticket.title}`
+                    }
+                }
+            });
         }
 
         const updatedTicket = await ticket.save();

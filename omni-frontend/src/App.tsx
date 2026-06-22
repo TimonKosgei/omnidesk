@@ -1,36 +1,51 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { AuthProvider, useAuth } from './context/AuthContext'
-import { KitchenProvider } from './context/KitchenContext'
-import { AuthPage } from './pages/AuthPage'
-import { AppLayout } from './components/AppLayout'
-
 import { ProtectedRoute } from './components/ProtectedRoute'
-import { DashboardPage } from './pages/DashboardPage'
-import { PantryPage } from './pages/PantryPage'
-import { PlannerPage } from './pages/PlannerPage'
-import { ShoppingPage } from './pages/ShoppingPage'
+import { OmiDeskLayout } from './components/OmiDeskLayout'
+import { AuthPage } from './pages/AuthPage'
+
+// Import all three dashboards
+import { StaffDashboardPage } from './pages/StaffDashboardPage'
+import { TechnicianDashboardPage } from './pages/TechnicianDashboardPage'
+import { SupervisorDashboardPage } from './pages/SupervisorDashboardPage'
+
+function DashboardSwitch() {
+  const { role } = useAuth()
+
+  // Dynamic dashboard injection matching your schema roles
+  switch (role) {
+    case 'admin':
+    case 'supervisor':
+      return <SupervisorDashboardPage />
+    case 'technician':
+      return <TechnicianDashboardPage />
+    case 'staff':
+    default:
+      return <StaffDashboardPage />
+  }
+}
 
 function AppRoutes() {
   const { token } = useAuth()
 
   return (
     <Routes>
+      {/* If authenticated, redirect away from /auth automatically */}
       <Route path="/auth" element={token ? <Navigate to="/" replace /> : <AuthPage />} />
+      
+      {/* Protected Layout Route containing the Dynamic Switch component */}
       <Route
         path="/"
         element={(
           <ProtectedRoute>
-            <KitchenProvider>
-              <AppLayout />
-            </KitchenProvider>
+            <OmiDeskLayout>
+              <DashboardSwitch />
+            </OmiDeskLayout>
           </ProtectedRoute>
         )}
-      >
-        <Route index element={<DashboardPage />} />
-        <Route path="pantry" element={<PantryPage />} />
-        <Route path="planner" element={<PlannerPage />} />
-        <Route path="shopping" element={<ShoppingPage />} />
-      </Route>
+      />
+      
+      {/* Catch all broken urls */}
       <Route path="*" element={<Navigate to={token ? '/' : '/auth'} replace />} />
     </Routes>
   )

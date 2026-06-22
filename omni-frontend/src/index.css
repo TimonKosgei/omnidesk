@@ -5,9 +5,9 @@
 body {
   margin: 0;
   min-width: 320px;
-  background: #fbf8f3;
-  color: #1a3c34;
-  font-family: Inter, system-ui, sans-serif;
+  background: #f8fafc;
+  color: #0f172a;
+  font-family: Inter, system-ui, -apple-system, sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -25,6 +25,7 @@ a {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }

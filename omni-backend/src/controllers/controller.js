@@ -1,6 +1,6 @@
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const { User, Ticket, Asset } = require('../models/model'); // Adjust path to your model file location
+const { User, Ticket, Asset, Department, Location } = require('../models/model');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -135,7 +135,7 @@ const getTickets = async (req, res) => {
 
         // If the user is plain staff, restrict them to their own logged issues
         if (req.user.role === "staff") {
-            query.reportedBy = req.user._id;
+            query.reportedBy = req.user.id;
         } else if (req.query.status) {
             query.status = req.query.status;
         }
@@ -206,7 +206,7 @@ const addComment = async (req, res) => {
         }
 
         ticket.comments.push({
-            user: req.user._id,
+            user: req.user.id,
             message: message
         });
 

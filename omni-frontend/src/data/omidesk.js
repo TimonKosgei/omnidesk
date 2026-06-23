@@ -1,4 +1,4 @@
-export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000'
+export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'https://omnidesk-backend-qrhy.onrender.com'
 export const STORAGE_KEY = 'omidesk-auth'
 
 export const TICKET_PRIORITIES = ['low', 'medium', 'high', 'critical']

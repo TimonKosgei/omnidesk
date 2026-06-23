@@ -103,7 +103,7 @@ const getUsers = async (req, res) => {
 const createTicket = async (req, res) => {
     try {
         const { title, description, department, location, asset, priority } = req.body;
-        const reportedBy = req.user._id; // Fixed: Adjusted to match internal object syntax uniformly
+        const reportedBy = req.user.id; // Fixed: Adjusted to match internal object syntax uniformly
 
         if (!title || !description || !department || !location) {
             return res.status(400).json({ success: false, message: "Please provide all required fields." });
